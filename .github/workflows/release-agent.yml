@@ -1,0 +1,30 @@
+name: Release agent binary
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch: {}
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build Windows binary
+        run: ./build.sh "ovc-agent-${{ github.ref_name }}.exe"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ovc-agent-${{ github.ref_name }}.exe
+          generate_release_notes: true

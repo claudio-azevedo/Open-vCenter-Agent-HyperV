@@ -1,0 +1,31 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/ovc-agent
+/ovc-agent-*
+
+# Test / coverage
+*.test
+*.out
+coverage.*
+
+# Local job store / logs
+*.db
+*.db-wal
+*.db-shm
+agent.log
+agent_failed.log
+powershell_*.log
+upgrade-pending.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local-only notes, never published
+PRE-PUBLISH.md
