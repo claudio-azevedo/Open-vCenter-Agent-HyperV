@@ -1324,6 +1324,10 @@ func (d *Dispatcher) handleVMMigrate(ctx context.Context, p VMManagementPayload)
 
 		if !targetFound {
 			// Target host is not a cluster node - fall through to non-cluster migration
+			if err := d.requireLiveMigrationSupport(migrateCtx, p.VMName,
+				fmt.Sprintf("target host '%s' is not a node of this cluster", details.TargetHost)); err != nil {
+				return nil, err
+			}
 			d.logger.Info("target host is not a cluster node, using non-cluster live migration",
 				"vm", p.VMName, "target", details.TargetHost)
 			return d.migrateVMWithoutCluster(migrateCtx, p, details)
@@ -1360,31 +1364,41 @@ try {
 		}
 
 		if strings.TrimSpace(checkOutput) == "CLUSTER_VM" {
-			// VM is a cluster resource - use Move-ClusterVirtualMachineRole
+			// VM is a cluster resource - use Move-ClusterVirtualMachineRole with
+			// the migration type this cluster supports (live needs AD).
+			migrationType := d.clusterMigrationType(migrateCtx)
+			d.logger.Info("migrating cluster VM",
+				"vm", p.VMName, "target", details.TargetHost, "migration_type", migrationType)
 			migrateScript := fmt.Sprintf(`
 try {
-    Move-ClusterVirtualMachineRole -Name "%s" -Node "%s" -ErrorAction Stop
+    Move-ClusterVirtualMachineRole -Name "%s" -Node "%s" -MigrationType %s -ErrorAction Stop
 } catch {
     [Console]::Error.WriteLine("MIGRATE_FAILED: $($_.Exception.Message)")
     exit 1
 }
-`, p.VMName, escapePS(details.TargetHost))
+`, p.VMName, escapePS(details.TargetHost), migrationType)
 
 			_, err = hyperv.RunPowerShell(migrateCtx, migrateScript)
 			if err != nil {
-				return nil, fmt.Errorf("failed to migrate VM '%s' to host '%s': %s",
-					p.VMName, details.TargetHost, extractPSErrorDetail(err, "MIGRATE_FAILED:"))
+				return nil, fmt.Errorf("failed to %s-migrate VM '%s' to host '%s': %s",
+					strings.ToLower(migrationType), p.VMName, details.TargetHost,
+					extractPSErrorDetail(err, "MIGRATE_FAILED:"))
 			}
 
 			return &VMManagementResult{
 				VMID:   p.VMID,
 				VMName: p.VMName,
 				Action: "vm_migrate",
-				Status: fmt.Sprintf("migrated to %s (cluster)", details.TargetHost),
+				Status: fmt.Sprintf("migrated to %s (cluster, %s migration)",
+					details.TargetHost, strings.ToLower(migrationType)),
 			}, nil
 		}
 
 		// VM is NOT a cluster resource - use non-cluster live migration
+		if err := d.requireLiveMigrationSupport(migrateCtx, p.VMName,
+			fmt.Sprintf("VM '%s' is not a cluster role (High Availability is disabled)", p.VMName)); err != nil {
+			return nil, err
+		}
 		d.logger.Info("VM is on a clustered host but not added as a cluster resource, using non-cluster live migration",
 			"vm", p.VMName, "target", details.TargetHost)
 		return d.migrateVMWithoutCluster(migrateCtx, p, details)
@@ -1392,6 +1406,41 @@ try {
 
 	// Host is not part of a cluster - use non-cluster live migration directly
 	return d.migrateVMWithoutCluster(migrateCtx, p, details)
+}
+
+// clusterMigrationType returns the Move-ClusterVirtualMachineRole -MigrationType
+// the local cluster supports. Live migration needs Kerberos, i.e. an
+// AD-attached cluster (AdministrativeAccessPoint = ActiveDirectoryAndDns); a
+// workgroup / DNS-only ("Dns") or detached ("None") cluster only supports Quick
+// migration (save state → move → resume). If the access point cannot be read,
+// Live is kept - the pre-existing behavior.
+func (d *Dispatcher) clusterMigrationType(ctx context.Context) string {
+	out, err := hyperv.RunPowerShellRaw(ctx, `(Get-Cluster -ErrorAction Stop).AdministrativeAccessPoint.ToString()`)
+	if err != nil {
+		d.logger.Warn("vm_migrate: failed to read cluster AdministrativeAccessPoint, assuming live migration",
+			"error", extractPSErrorDetail(err))
+		return "Live"
+	}
+	if strings.EqualFold(strings.TrimSpace(out), "ActiveDirectoryAndDns") {
+		return "Live"
+	}
+	return "Quick"
+}
+
+// requireLiveMigrationSupport guards a Move-VM (non-cluster, always live)
+// migration from a clustered host: only an AD-attached cluster supports live
+// migration, and Quick migration exists only for cluster roles. On a workgroup
+// / DNS-only cluster it returns an error explaining why (reason) and what to do,
+// instead of letting Move-VM fail with an authentication error.
+func (d *Dispatcher) requireLiveMigrationSupport(ctx context.Context, vmName, reason string) error {
+	if d.clusterMigrationType(ctx) == "Live" {
+		return nil
+	}
+	return fmt.Errorf(
+		"cannot migrate VM '%s': %s, and this cluster is not joined to an Active Directory domain, "+
+			"so live migration (Move-VM) is not supported - only Quick migration of cluster roles is. "+
+			"Enable High Availability on the VM and migrate it to another cluster node",
+		vmName, reason)
 }
 
 // migrateVMWithoutCluster performs a live migration using Move-VM (non-cluster method).

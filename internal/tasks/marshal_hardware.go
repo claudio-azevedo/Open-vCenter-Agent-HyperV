@@ -56,17 +56,29 @@ type hwHyperV struct {
 }
 
 type hwNIC struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	MAC         string `json:"mac"`
-	SpeedBps    int64  `json:"speedBps"`
-	Connected   bool   `json:"connected"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	MAC             string `json:"mac"`
+	SpeedBps        int64  `json:"speedBps"`
+	Connected       bool   `json:"connected"`
+	Status          string `json:"status,omitempty"`
+	LinkSpeed       string `json:"linkSpeed,omitempty"`
+	DriverVersion   string `json:"driverVersion,omitempty"`
+	DriverDate      string `json:"driverDate,omitempty"`
+	DriverProvider  string `json:"driverProvider,omitempty"`
+	FirmwareVersion string `json:"firmwareVersion,omitempty"`
 }
 
 type hwVSwitch struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	NetAdapter string `json:"netAdapter,omitempty"`
+	Name                     string   `json:"name"`
+	ID                       string   `json:"id,omitempty"`
+	Type                     string   `json:"type"`
+	NetAdapter               string   `json:"netAdapter,omitempty"`
+	AllowManagementOS        bool     `json:"allowManagementOS"`
+	EmbeddedTeaming          bool     `json:"embeddedTeaming"`
+	TeamMembers              []string `json:"teamMembers"`
+	LoadBalancingAlgorithm   string   `json:"loadBalancingAlgorithm,omitempty"`
+	BandwidthReservationMode string   `json:"bandwidthReservationMode,omitempty"`
 }
 
 type hwWire struct {
@@ -76,6 +88,7 @@ type hwWire struct {
 	OS          hwOS        `json:"os"`
 	Network     []hwNIC     `json:"network"`
 	VSwitches   []hwVSwitch `json:"vSwitches"`
+	HBAs        []HBAInfo   `json:"hbas"`
 	System      *hwSystem   `json:"system"`
 	BootTime    string      `json:"bootTime,omitempty"`
 	Load        *hwLoad     `json:"load"`
@@ -117,16 +130,40 @@ func (r *HardwareInventoryResult) MarshalJSON() ([]byte, error) {
 	network := make([]hwNIC, 0, len(r.NetAdapters))
 	for _, n := range r.NetAdapters {
 		network = append(network, hwNIC{
-			Name:        n.Name,
-			Description: n.Description,
-			MAC:         n.MAC,
-			SpeedBps:    n.SpeedBps,
-			Connected:   n.Connected,
+			Name:            n.Name,
+			Description:     n.Description,
+			MAC:             n.MAC,
+			SpeedBps:        n.SpeedBps,
+			Connected:       n.Connected,
+			Status:          n.Status,
+			LinkSpeed:       n.LinkSpeed,
+			DriverVersion:   n.DriverVersion,
+			DriverDate:      n.DriverDate,
+			DriverProvider:  n.DriverProvider,
+			FirmwareVersion: n.FirmwareVersion,
 		})
 	}
 	vSwitches := make([]hwVSwitch, 0, len(r.VSwitches))
 	for _, s := range r.VSwitches {
-		vSwitches = append(vSwitches, hwVSwitch{Name: s.Name, Type: s.Type, NetAdapter: s.NetAdapter})
+		members := s.TeamMembers
+		if members == nil {
+			members = []string{}
+		}
+		vSwitches = append(vSwitches, hwVSwitch{
+			Name:                     s.Name,
+			ID:                       s.ID,
+			Type:                     s.Type,
+			NetAdapter:               s.NetAdapter,
+			AllowManagementOS:        s.AllowManagementOS,
+			EmbeddedTeaming:          s.EmbeddedTeaming,
+			TeamMembers:              members,
+			LoadBalancingAlgorithm:   s.LoadBalancingAlgorithm,
+			BandwidthReservationMode: s.BandwidthReservationMode,
+		})
+	}
+	hbas := r.HBAs
+	if hbas == nil {
+		hbas = []HBAInfo{}
 	}
 
 	w := hwWire{
@@ -136,6 +173,7 @@ func (r *HardwareInventoryResult) MarshalJSON() ([]byte, error) {
 		OS:          hwOS{Caption: r.OSName, Version: r.OSVersion},
 		Network:     network,
 		VSwitches:   vSwitches,
+		HBAs:        hbas,
 		BootTime:    r.LastBootTime,
 		Load:        &hwLoad{CPUPercent: r.CPULoadPercent, MemoryPercent: r.MemoryUsagePercent},
 	}

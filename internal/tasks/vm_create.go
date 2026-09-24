@@ -420,17 +420,20 @@ if ($dvd) {
 			}
 		}
 
-		// Boot order
+		// Boot order. Only the OS disk (attached by New-VM -VHDPath, so the
+		// lowest controller/location) goes in the list; with multiple disks
+		// Get-VMHardDiskDrive returns an array, and "$DVD, $HD" would build a
+		// nested array that -BootOrder cannot bind.
 		var bootScript string
 		if p.DVD != "" {
 			bootScript = fmt.Sprintf(`
-$HD = Get-VMHardDiskDrive -VMName "%s"
-$DVD = Get-VMDvdDrive -VMName "%s"
-Set-VMFirmware -VMName "%s" -BootOrder $DVD, $HD -ErrorAction Stop
+$HD = Get-VMHardDiskDrive -VMName "%s" | Sort-Object ControllerNumber, ControllerLocation | Select-Object -First 1
+$DVD = Get-VMDvdDrive -VMName "%s" | Select-Object -First 1
+Set-VMFirmware -VMName "%s" -BootOrder @($DVD, $HD) -ErrorAction Stop
 `, p.Name, p.Name, p.Name)
 		} else {
 			bootScript = fmt.Sprintf(`
-$HD = Get-VMHardDiskDrive -VMName "%s"
+$HD = Get-VMHardDiskDrive -VMName "%s" | Sort-Object ControllerNumber, ControllerLocation | Select-Object -First 1
 Set-VMFirmware -VMName "%s" -BootOrder $HD -ErrorAction Stop
 `, p.Name, p.Name)
 		}

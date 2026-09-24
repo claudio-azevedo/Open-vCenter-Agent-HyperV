@@ -12,7 +12,7 @@ import (
 	"ovc-agent/internal/protocol"
 )
 
-const AgentVersion = "1.0.5"
+const AgentVersion = "1.0.6"
 
 // Hypervisor / AgentType identify this build in the agent_status payload so the
 // backend can set Host.hypervisor (see ovc-backend LLM.md).

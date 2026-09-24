@@ -44,24 +44,53 @@ type HardwareInventoryResult struct {
 	Storage            []StorageInfo      `json:"storage"`
 	NetAdapters        []NetAdapterInfo   `json:"netAdapters"`
 	VSwitches          []VSwitchInfo      `json:"vSwitches"`
+	HBAs               []HBAInfo          `json:"hbas"`
 	ISOs               []hostinfo.ISOInfo `json:"isos"`
 }
 
 // NetAdapterInfo is one physical host NIC (reported whether connected or not).
 type NetAdapterInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	MAC         string `json:"mac"`
-	SpeedBps    int64  `json:"speedBps"`
-	Connected   bool   `json:"connected"`
-	Status      string `json:"status"`
+	Name            string `json:"name"`
+	Description     string `json:"description"` // InterfaceDescription - the adapter model
+	MAC             string `json:"mac"`
+	SpeedBps        int64  `json:"speedBps"`
+	Connected       bool   `json:"connected"`
+	Status          string `json:"status"`
+	LinkSpeed       string `json:"linkSpeed"`
+	DriverVersion   string `json:"driverVersion"`
+	DriverDate      string `json:"driverDate"`
+	DriverProvider  string `json:"driverProvider"`
+	FirmwareVersion string `json:"firmwareVersion"`
 }
 
 // VSwitchInfo is one Hyper-V virtual switch.
 type VSwitchInfo struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`       // External | Internal | Private
-	NetAdapter string `json:"netAdapter"` // physical uplink (External only)
+	Name                     string   `json:"name"`
+	ID                       string   `json:"id"`
+	Type                     string   `json:"type"`       // External | Internal | Private
+	NetAdapter               string   `json:"netAdapter"` // physical uplink (External only)
+	AllowManagementOS        bool     `json:"allowManagementOS"`
+	EmbeddedTeaming          bool     `json:"embeddedTeaming"`
+	TeamMembers              []string `json:"teamMembers"`
+	LoadBalancingAlgorithm   string   `json:"loadBalancingAlgorithm"`
+	BandwidthReservationMode string   `json:"bandwidthReservationMode"`
+}
+
+// HBAInfo is one Fibre Channel host bus adapter (best-effort - a host without
+// FC storage reports none).
+type HBAInfo struct {
+	Manufacturer     string `json:"manufacturer"`
+	Model            string `json:"model"`
+	ModelDescription string `json:"modelDescription"`
+	SerialNumber     string `json:"serialNumber"`
+	DriverVersion    string `json:"driverVersion"`
+	FirmwareVersion  string `json:"firmwareVersion"`
+	HardwareVersion  string `json:"hardwareVersion"`
+	NodeWWN          string `json:"nodeWWN"`
+	PortWWN          string `json:"portWWN"`
+	State            string `json:"state"`
+	Speed            string `json:"speed"`
+	ConnectionType   string `json:"connectionType"`
 }
 
 // DiskInfo holds basic disk space information
@@ -204,25 +233,82 @@ if ($isCluster) {
 $netAdapters = @()
 try {
     foreach ($na in @(Get-NetAdapter -Physical -ErrorAction Stop)) {
+        $fw = ""
+        try {
+            $fwProp = Get-NetAdapterAdvancedProperty -Name $na.Name -ErrorAction Stop | Where-Object { $_.DisplayName -match 'Firmware' } | Select-Object -First 1
+            if ($fwProp) { $fw = [string]$fwProp.DisplayValue }
+        } catch {}
+        $dDate = ""
+        if ($na.DriverDate) { try { $dDate = ([datetime]$na.DriverDate).ToString('yyyy-MM-dd') } catch { $dDate = [string]$na.DriverDate } }
         $netAdapters += [PSCustomObject]@{
-            name        = $na.Name
-            description = $na.InterfaceDescription
-            mac         = $na.MacAddress
-            speedBps    = [int64]$na.Speed
-            connected   = ($na.Status -eq 'Up')
-            status      = "$($na.Status)"
+            name            = $na.Name
+            description     = $na.InterfaceDescription
+            mac             = $na.MacAddress
+            speedBps        = [int64]$na.Speed
+            connected       = ($na.Status -eq 'Up')
+            status          = "$($na.Status)"
+            linkSpeed       = [string]$na.LinkSpeed
+            driverVersion   = [string]$na.DriverVersion
+            driverDate      = $dDate
+            driverProvider  = [string]$na.DriverProvider
+            firmwareVersion = $fw
         }
     }
 } catch {}
 
-# Hyper-V virtual switches.
+# Hyper-V virtual switches (+ SET team members when embedded teaming is on).
 $vSwitches = @()
 try {
     foreach ($sw in @(Get-VMSwitch -ErrorAction Stop)) {
+        $members = @()
+        $lba = ""
+        try {
+            $t = Get-VMSwitchTeam -Name $sw.Name -ErrorAction Stop
+            if ($t) { $members = @($t.NetAdapterInterfaceDescription); $lba = [string]$t.LoadBalancingAlgorithm }
+        } catch {}
         $vSwitches += [PSCustomObject]@{
-            name       = $sw.Name
-            type       = "$($sw.SwitchType)"
-            netAdapter = "$($sw.NetAdapterInterfaceDescription)"
+            name                     = $sw.Name
+            id                       = [string]$sw.Id
+            type                     = "$($sw.SwitchType)"
+            netAdapter               = "$($sw.NetAdapterInterfaceDescription)"
+            allowManagementOS        = [bool]$sw.AllowManagementOS
+            embeddedTeaming          = [bool]$sw.EmbeddedTeamingEnabled
+            teamMembers              = @($members)
+            loadBalancingAlgorithm   = $lba
+            bandwidthReservationMode = [string]$sw.BandwidthReservationMode
+        }
+    }
+} catch {}
+
+# Fibre Channel HBAs (best-effort: no FC WMI provider -> none).
+$hbas = @()
+try {
+    $fcAdapters = @(Get-CimInstance -Namespace 'root\wmi' -ClassName MSFC_FCAdapterHBAAttributes -ErrorAction Stop)
+    $fcInit = @()
+    try { $fcInit = @(Get-InitiatorPort -ErrorAction Stop | Where-Object { $_.ConnectionType -eq 'Fibre Channel' }) } catch {}
+    for ($i = 0; $i -lt $fcAdapters.Count; $i++) {
+        $a = $fcAdapters[$i]
+        $wwnHex = ""
+        try { $wwnHex = (($a.NodeWWN | ForEach-Object { $_.ToString('X2') }) -join ':') } catch {}
+        $state = ""
+        $portWwn = ""
+        if ($i -lt $fcInit.Count) {
+            $state = [string]$fcInit[$i].OperationalStatus
+            $portWwn = [string]$fcInit[$i].PortAddress
+        }
+        $hbas += [PSCustomObject]@{
+            manufacturer     = [string]$a.Manufacturer
+            model            = [string]$a.Model
+            modelDescription = [string]$a.ModelDescription
+            serialNumber     = [string]$a.SerialNumber
+            driverVersion    = [string]$a.DriverVersion
+            firmwareVersion  = [string]$a.FirmwareVersion
+            hardwareVersion  = [string]$a.HardwareVersion
+            nodeWWN          = $wwnHex
+            portWWN          = $portWwn
+            state            = $state
+            speed            = ""
+            connectionType   = "FibreChannel"
         }
     }
 } catch {}
@@ -253,7 +339,8 @@ try {
     storage            = $storage
     netAdapters        = $netAdapters
     vSwitches          = $vSwitches
-} | ConvertTo-Json -Depth 4 -Compress
+    hbas               = $hbas
+} | ConvertTo-Json -Depth 5 -Compress
 `, isCluster)
 
 	output, err := hyperv.RunPowerShell(ctx, script)
@@ -273,6 +360,7 @@ try {
 		StorageRaw     json.RawMessage `json:"storage"`
 		NetAdaptersRaw json.RawMessage `json:"netAdapters"`
 		VSwitchesRaw   json.RawMessage `json:"vSwitches"`
+		HBAsRaw        json.RawMessage `json:"hbas"`
 	}
 	if err := json.Unmarshal(output, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse hardware inventory JSON: %v (raw: %s)", err, string(output))
@@ -281,6 +369,7 @@ try {
 	result := raw.HardwareInventoryResult
 	result.NetAdapters = decodeArrayOrSingle[NetAdapterInfo](raw.NetAdaptersRaw)
 	result.VSwitches = decodeArrayOrSingle[VSwitchInfo](raw.VSwitchesRaw)
+	result.HBAs = decodeArrayOrSingle[HBAInfo](raw.HBAsRaw)
 
 	// Ensure clusterNodes is never null in JSON output
 	if result.ClusterNodes == nil {
