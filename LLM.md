@@ -120,6 +120,19 @@ last hour. `vm_metrics` only includes VMs with Hyper-V resource metering enabled
 (`Enable-VMResourceMetering` via the `vm_enable_metrics` action); `vm_inventory`
 reports `metricsEnabled` per VM.
 
+`vm_inventory` also carries, per VM, two best-effort fields that are omitted when
+unknown (the backend then keeps the last stored value):
+
+- `guestOs` - guest OS name from the KVP integration service
+  (`Msvm_SummaryInformation.GuestOperatingSystem`, one CIM enumeration in the
+  basic block). Only reported while the VM runs with integration services up.
+- `thumbnail` - 320x240 JPEG of the console (base64 in JSON), Running VMs only
+  (`internal/tasks/vm_thumbnail.go`). One extra PowerShell spawn calls
+  `Msvm_VirtualSystemManagementService.GetVirtualSystemThumbnailImage` against
+  each VM's *realized* settings and returns raw RGB565 frames (4-byte header +
+  `w*h*2` bytes); Go converts them to JPEG. The spawn is skipped when no VM is
+  running; a failed capture never fails the inventory.
+
 `agent_status` also reports the agent type (`hypervisor: "hyperv"`,
 `agent_type: "ovc-agent-hyperv"`).
 

@@ -45,6 +45,16 @@ type VMInfo struct {
 	SecureBoot           bool         `json:"secureBoot"`
 	SecureBootTemplate   string       `json:"secureBootTemplate"`
 	MetricsEnabled       bool         `json:"metricsEnabled"`
+	// GuestOS is the guest operating system reported by the Hyper-V KVP
+	// integration service (Msvm_SummaryInformation.GuestOperatingSystem). It is
+	// only available while the VM is running with integration services active,
+	// so it is omitted from the payload when unknown. The backend treats an
+	// absent value as "no new information" and keeps the previously stored OS.
+	GuestOS *string `json:"guestOs,omitempty"`
+	// Thumbnail is a 320x240 JPEG of the VM console, captured only for Running VMs
+	// during the full inventory (base64 in JSON). Omitted when the VM is not
+	// running or the capture failed; the backend then keeps the last stored image.
+	Thumbnail []byte `json:"thumbnail,omitempty"`
 }
 
 type VMSnapshot struct {
@@ -83,27 +93,28 @@ type VMVHD struct {
 
 // Internal types for JSON deserialization from PowerShell blocks
 type vmBasicInfo struct {
-	ID                  string `json:"id"`
-	Name                string `json:"name"`
-	PowerState          string `json:"powerState"`
-	Firmware            string `json:"firmware"`
-	CPUCount            int    `json:"cpuCount"`
-	MemoryMB            int64  `json:"memoryMb"`
-	MemoryMinBytes      int64  `json:"memoryMinBytes"`
-	MemoryMaxBytes      int64  `json:"memoryMaxBytes"`
-	MemoryDynamic       bool   `json:"memoryDynamic"`
-	State               string `json:"state"`
-	Notes               string `json:"notes"`
-	UptimeSeconds       int64  `json:"uptimeSec"`
-	Uptime              string `json:"uptime"`
-	CPUUsagePercent     int    `json:"cpuUsagePct"`
-	MemoryConsumedMB    int64  `json:"memoryConsumedMb"`
-	AutomaticStart      string `json:"automaticStart"`
-	AutomaticStartDelay int    `json:"automaticStartDelay"`
-	AutomaticStop       string `json:"automaticStop"`
-	Path                string `json:"path"`
-	CreationTime        string `json:"creationTime"`
-	MetricsEnabled      bool   `json:"metricsEnabled"`
+	ID                  string  `json:"id"`
+	Name                string  `json:"name"`
+	PowerState          string  `json:"powerState"`
+	Firmware            string  `json:"firmware"`
+	CPUCount            int     `json:"cpuCount"`
+	MemoryMB            int64   `json:"memoryMb"`
+	MemoryMinBytes      int64   `json:"memoryMinBytes"`
+	MemoryMaxBytes      int64   `json:"memoryMaxBytes"`
+	MemoryDynamic       bool    `json:"memoryDynamic"`
+	State               string  `json:"state"`
+	Notes               string  `json:"notes"`
+	UptimeSeconds       int64   `json:"uptimeSec"`
+	Uptime              string  `json:"uptime"`
+	CPUUsagePercent     int     `json:"cpuUsagePct"`
+	MemoryConsumedMB    int64   `json:"memoryConsumedMb"`
+	AutomaticStart      string  `json:"automaticStart"`
+	AutomaticStartDelay int     `json:"automaticStartDelay"`
+	AutomaticStop       string  `json:"automaticStop"`
+	Path                string  `json:"path"`
+	CreationTime        string  `json:"creationTime"`
+	MetricsEnabled      bool    `json:"metricsEnabled"`
+	GuestOS             *string `json:"guestOs"`
 }
 
 type vmNicInfo struct {
@@ -511,8 +522,23 @@ try {
         return
     }
 
+    # Guest OS via the KVP integration service. One CIM enumeration for all VMs,
+    # keyed by VM GUID (Msvm_SummaryInformation.Name). Best effort: any failure
+    # leaves the map empty and guestOs is emitted as null for every VM.
+    $guestOsMap = @{}
+    try {
+        $summaries = @(Get-CimInstance -Namespace root/virtualization/v2 -ClassName Msvm_SummaryInformation -ErrorAction Stop)
+        foreach ($s in $summaries) {
+            $os = "$($s.GuestOperatingSystem)".Trim()
+            if ($s.Name -and $os) { $guestOsMap["$($s.Name)".ToLower()] = $os }
+        }
+    } catch {}
+
     $list = [System.Collections.ArrayList]::new()
     foreach ($v in $vms) {
+        $vmIdKey = "$($v.Id)".ToLower()
+        $guestOs = $null
+        if ($guestOsMap.ContainsKey($vmIdKey)) { $guestOs = $guestOsMap[$vmIdKey] }
         $null = $list.Add([pscustomobject]@{
             id               = "$($v.Id)"
             name             = $v.Name
@@ -535,6 +561,7 @@ try {
             path             = $v.Path
             creationTime     = $v.CreationTime.ToString("o")
             metricsEnabled   = [bool]$v.ResourceMeteringEnabled
+            guestOs          = $guestOs
         })
     }
     $list | ConvertTo-Json -Depth 5 -Compress
@@ -618,6 +645,27 @@ try {
 	// --- Assemble final result ---
 	vms := assembleVMInventory(basics, nicsMap, vhdsMap, dvdMap, nestedMap, snapshotsMap, firmwareMap, haMap)
 
+	// --- Console thumbnails (Running VMs only, best effort) ---
+	// Skip the PowerShell spawn entirely when no VM is running.
+	hasRunning := false
+	for _, b := range basics {
+		if b.State == "Running" {
+			hasRunning = true
+			break
+		}
+	}
+	if hasRunning {
+		thumbs := d.collectVMThumbnails()
+		for i := range vms {
+			if vms[i].State != "Running" {
+				continue
+			}
+			if jpg, ok := thumbs[strings.ToLower(vms[i].ID)]; ok {
+				vms[i].Thumbnail = jpg
+			}
+		}
+	}
+
 	return &VMInventoryResult{VMs: vms}, nil
 }
 
@@ -671,6 +719,10 @@ func assembleVMInventory(
 			NestedVirtualization: nestedMap[b.Name],
 			SecureBoot:           firmwareMap[b.Name].SecureBoot,
 			SecureBootTemplate:   firmwareMap[b.Name].SecureBootTemplate,
+			GuestOS:              b.GuestOS,
+		}
+		if vm.GuestOS != nil && strings.TrimSpace(*vm.GuestOS) == "" {
+			vm.GuestOS = nil
 		}
 		if vm.NICs == nil {
 			vm.NICs = []VMNic{}
