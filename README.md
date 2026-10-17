@@ -5,7 +5,7 @@ communicates exclusively via RabbitMQ with `ovc-backend`. Build **for Windows on
 
 The queue protocol (`<hostid>.*`) and the request/response and inventory payloads are
 hypervisor-agnostic - in the future other agents (libvirt/KVM) will implement the same
-contract. Source of truth for the contract: `../ovc-backend/app/messaging/`.
+contract.
 
 ## Architecture
 
